@@ -1,0 +1,230 @@
+---
+title: "Практическая работа №4. Анализ данных сетевого трафика с использованием аналитической in-memory СУБД DuckDB"
+author: "Смирнов Михаил БИСО-03-20"
+format: 
+    md:
+        output-file: README.md
+engine: knitr
+---
+
+## Цель работы
+
+1\. Изучить возможности СУБД DuckDB для обработки и анализ больших данных 2. Получить навыки применения DuckDB совместно с языком программирования R 3. Получить навыки анализа метаинфомации о сетевом трафике 4. Получить навыки применения облачных технологий хранения, подготовки и анализа данных: Yandex Object Storage, Rstudio Server.
+
+## Ход работы
+
+```{r}
+library(duckdb)
+```
+
+```{r}
+library(dplyr)
+```
+
+```{r}
+library(tidyverse)
+```
+
+```{r}
+connection1 <- dbConnect(duckdb::duckdb(), dbdir = ":memory:")
+dbExecute(conn = connection1, "INSTALL httpfs; LOAD httpfs;")
+```
+
+```{r}
+ParquetFile = "https://storage.yandexcloud.net/arrow-datasets/tm_data.pqt"
+```
+
+```{r}
+query <- "SELECT * FROM read_parquet([?])"
+```
+
+```{r}
+data <- dbGetQuery(connection1, query, list(ParquetFile))
+```
+
+### Задание 1. Найдите утечку данных из Вашей сети
+
+Важнейшие документы с результатами нашей исследовательской деятельности в области создания вакцин скачиваются в виде больших заархивированных дампов. Один из хостов в нашей сети используется для пересылки этой информации – он пересылает гораздо больше информации на внешние ресурсы в Интернете, чем остальные компьютеры нашей сети. Определите его IP-адрес.
+
+```{r}
+out <- out <- data %>% 
+  select(src, dst, bytes) %>% 
+  filter(!str_detect(dst, '1[2-4].*')) %>% 
+  select(src, bytes) %>% 
+  group_by(src) %>% 
+  summarize(sum_bytes = sum(bytes)) %>% 
+  filter(sum_bytes == max(sum_bytes))
+```
+
+```{r}
+print(out$src)
+```
+
+### Задание 2. Надите утечку данных 2
+
+Другой атакующий установил автоматическую задачу в системном планировщике cron для экспорта содержимого внутренней wiki системы. Эта система генерирует большое количество трафика в нерабочие часы, больше чем остальные хосты. 
+Определите IP этой системы. Известно, что ее IP адрес отличается от нарушителя из предыдущей задачи.
+
+Для начала определим рабочие часы:
+
+```{r}
+data_filter <- data %>% 
+  select(timestamp, src, dst, bytes) %>% 
+  mutate(trafic = (str_detect(src, '1[2-4].*') & 
+                     !str_detect(dst, '1[2-4].*')),
+         time = hour(as_datetime(timestamp/1000))) %>%
+  filter(trafic == TRUE, time >= 0 & time <= 24) %>%
+  group_by(time) %>% 
+  summarise(trafictime = n()) %>% 
+  arrange(desc(trafictime))
+```
+
+```{r}
+data_filter |> collect()
+```
+
+```{r}
+data_last <- data %>% 
+  mutate(time = hour(as_datetime(timestamp/1000))) %>%
+  filter(!str_detect(src, "^13.37.84.125")) %>%
+  filter(str_detect(src, '1[2-4].*')) %>%
+  filter(!str_detect(dst, '1[2-4].*')) %>% 
+  filter(time >= 1 & time <= 15) %>% 
+  group_by(src) %>% summarise("sum" = sum(bytes)) %>%
+  select(src,sum)
+```
+
+```{r}
+data_last_head1 <- data_last %>% 
+  arrange(desc(sum)) %>% 
+  head(1)
+```
+
+```{r}
+print(data_last_head1$src)
+```
+
+### Задание 3. Найдите утечку данных 3
+
+Еще один нарушитель собирает содержимое электронной почты и отправляет в Интернет используя порт, который обычно используется для другого типа трафика.
+Атакующий пересылает большое количество информации используя этот порт, которое нехарактерно для других хостов, использующих этот номер порта.
+Определите IP этой системы. Известно, что ее IP адрес отличается от нарушителей из предыдущих задач.
+
+Отбираем интересующие нас ip адреса
+
+```{r}
+ipaddr1 <- data %>% 
+  filter(!str_detect(src, "^13.37.84.125")) %>%
+  filter(!str_detect(src, "^12.55.77.96")) %>%
+  filter(str_detect(src, "^12.") 
+         | str_detect(src, "^13.") 
+         | str_detect(src, "^14."))  %>% 
+  filter(!str_detect(dst, "^12.") 
+         | !str_detect(dst, "^13.") 
+         | !str_detect(dst, "^14."))  %>% 
+  select(src, bytes, port)
+```
+
+```{r}
+ipaddr1 |> collect()
+```
+
+группируем по портам, вычисляем максимальный и средний размер трафика и находим порт с большей разницей
+
+```{r}
+ipaddr2 <-ipaddr1 %>%  
+  group_by(port) %>% 
+  summarise("mean"=mean(bytes), 
+            "max"=max(bytes), 
+            "sum" = sum(bytes)) %>%  
+  mutate("raznitsa"= max-mean) %>% 
+  arrange(desc(raznitsa)) %>% 
+  head(1)
+```
+
+```{r}
+ipaddr2 |> collect()
+```
+
+Мы определили порт, который использовался для другого трафика
+
+```{r}
+ipaddr3 <- ipaddr1  %>% 
+  filter(port==37) %>% 
+  group_by(src) %>% 
+  summarise("mean"= mean(bytes)) %>%
+  arrange(desc(mean)) %>% 
+  head(1) %>%
+  select(src)
+```
+
+```{r}
+ipaddr3 |> collect()
+```
+
+### Задание 4. Обнаружение канала управления
+
+Зачастую в корпоротивных сетях находятся ранее зараженные системы, компрометация которых осталась незамеченной. Такие системы генерируют небольшое количество трафика для связи с панелью управления бот-сети, но с одинаковыми параметрами – в данном случае с одинаковым номером порта. 
+
+Какой номер порта используется бот-панелью для управления ботами?
+
+```{r}
+port_num1<- data%>%
+  group_by(port) %>%
+  summarise(minBytes = min(bytes),
+            maxBytes = max(bytes),
+            diffBytes = max(bytes) - min(bytes),
+            avgBytes = mean(bytes),
+            count = n()) %>%
+  filter(avgBytes - minBytes < 10 & minBytes != maxBytes) %>%
+  select(port)
+```
+
+```{r}
+port_num1
+```
+
+### Задание 5: Обнаружение P2P трафика
+
+Иногда компрометация сети проявляется в нехарактерном трафике между хостами в локальной сети, который свидетельствует о горизонтальном перемещении (lateral movement). В нашей сети замечена система, которая ретранслирует по локальной сети полученные от панели управления бот-сети команды, создав таким образом внутреннюю пиринговую сеть. 
+
+Какой уникальный порт используется этой бот сетью для внутреннего общения между собой?
+
+```{r}
+port_num2 <- data %>%
+  filter(str_detect(src, "^12.") | str_detect(src, "^13.") | str_detect(src, "^14."))  %>%
+  filter(str_detect(dst, "^12.") | str_detect(dst, "^13.") | str_detect(dst, "^14."))  %>% 
+  group_by(port) %>%
+  summarise(z5_1 = max(bytes) - min(bytes)) %>%
+  arrange(desc(z5_1)) %>% 
+  select(port) %>% 
+  slice(1)
+```
+
+```{r}
+port_num2 |> collect()
+```
+
+### Задание 6: Чемпион малвари
+
+Нашу сеть только что внесли в списки спам-ферм. Один из хостов сети получает множество команд от панели C&C, ретранслируя их внутри сети. В обычных условиях причин для такого активного взаимодействия внутри сети у данного хоста нет.
+
+Определите IP такого хоста.
+
+```{r}
+port_num3 <- data %>%
+  filter(str_detect(src, "^12.") | str_detect(src, "^13.") | str_detect(src, "^14."))  %>%
+  filter(str_detect(dst, "^12.") | str_detect(dst, "^13.") | str_detect(dst, "^14."))  %>% 
+  group_by(src) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>% 
+  slice(1)
+```
+
+```{r}
+port_num3 |> collect()
+```
+
+### Вывод
+
+В ходе данной работы были изучены возможности СУБД DuckDB для обработки и анализ больших данных. 
