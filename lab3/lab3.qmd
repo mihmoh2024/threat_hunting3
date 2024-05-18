@@ -1,0 +1,171 @@
+---
+title: "Лабораторная работа №3.Анализ данных сетевого трафика"
+author: "Смирнов Михаил БИСО-03-20"
+format: 
+    md:
+        output-file: README.md
+editor: visual
+---
+
+## Цель работы
+
+1\. Изучить возможности технологии Apache Arrow для обработки и анализ больших
+данных
+2\. Получить навыки применения Arrow совместно с языком программирования R
+3\. Получить навыки анализа метаинфомации о сетевом трафике
+4\. Получить навыки применения облачных технологий хранения, подготовки и
+анализа данных: Yandex Object Storage, Rstudio Server.
+
+## Ход работы
+
+```{r}
+library(arrow)
+library(dplyr)
+library(tidyverse)
+```
+
+### Доступ к датасету
+
+```{r}
+dir.create("data", showWarnings = FALSE)
+```
+
+```{r}
+curl::multi_download("https://storage.yandexcloud.net/arrow-datasets/tm_data.pqt", "data/tm_data.pqt",resume = TRUE)
+```
+### Чтение датасета
+
+```{r}
+data <- read_parquet("data/tm_data.pqt", as_data_frame = FALSE)
+```
+```{r}
+print(data)
+```
+
+### Задание 1: Надите утечку данных из Вашей сети
+
+Важнейшие документы с результатами нашей исследовательской деятельности в области создания вакцин скачиваются в виде больших заархивированных дампов. 
+Один из хостов в нашей сети используется для пересылки этой информации – он пересылает гораздо больше информации на внешние ресурсы в Интернете, чем остальные компьютеры нашей сети. Определите его IP-адрес.
+
+```{r}
+out <- out <- data %>% 
+  select(src, dst, bytes) %>% 
+  filter(!str_detect(dst, '1[2-4].*')) %>% 
+  select(src, bytes) %>% 
+  group_by(src) %>% 
+  summarize(sum_bytes = sum(bytes)) %>% 
+  filter(sum_bytes == max(sum_bytes))
+```
+```{r}
+out
+```
+
+### Задание 2: Надите утечку данных 2
+
+Другой атакующий установил автоматическую задачу в системном планировщике cron для экспорта содержимого внутренней wiki системы. Эта система генерирует большое количество трафика в нерабочие часы, больше чем остальные хосты.
+Определите IP этой системы. Известно, что ее IP адрес отличается от нарушителя из предыдущей задачи.
+
+Для начала определим рабочие часы:
+
+```{r}
+data_filter <- data %>% 
+  select(timestamp, src, dst, bytes) %>% 
+  mutate(trafic = (str_detect(src, '1[2-4].*') & 
+                     !str_detect(dst, '1[2-4].*')),
+         time = hour(as_datetime(timestamp/1000))) %>%
+  filter(trafic == TRUE, time >= 0 & time <= 24) %>%
+  group_by(time) %>% 
+  summarise(trafictime = n()) %>% 
+  arrange(desc(trafictime))
+```
+
+```{r}
+data_filter |> collect()
+```
+
+```{r}
+data_last <- data %>% 
+  mutate(time = hour(as_datetime(timestamp/1000))) %>%
+  filter(!str_detect(src, "^13.37.84.125")) %>%
+  filter(str_detect(src, '1[2-4].*')) %>%
+  filter(!str_detect(dst, '1[2-4].*')) %>% 
+  filter(time >= 1 & time <= 15) %>% 
+  group_by(src) %>% summarise("sum" = sum(bytes)) %>%
+  select(src,sum)
+```
+
+```{r}
+data_last |> collect()
+```
+
+```{r}
+data_last_head1 <- data_last %>% 
+  arrange(desc(sum)) %>% 
+  head(1)
+```
+
+```{r}
+data_last_head1 |> collect()
+```
+
+### Задание 3: Надите утечку данных 3
+
+Еще один нарушитель собирает содержимое электронной почты и отправляет в Интернет используя порт, который обычно используется для другого типа трафика.
+Атакующий пересылает большое количество информации используя этот порт, которое нехарактерно для других хостов, использующих этот номер порта.
+Определите IP этой системы. Известно, что ее IP адрес отличается от нарушителей из предыдущих задач.
+
+Отбираем интересующие нас ip адреса
+
+```{r}
+ipaddr1 <- data %>% 
+  filter(!str_detect(src, "^13.37.84.125")) %>%
+  filter(!str_detect(src, "^12.55.77.96")) %>%
+  filter(str_detect(src, "^12.") 
+         | str_detect(src, "^13.") 
+         | str_detect(src, "^14."))  %>% 
+  filter(!str_detect(dst, "^12.") 
+         | !str_detect(dst, "^13.") 
+         | !str_detect(dst, "^14."))  %>% 
+  select(src, bytes, port)
+```
+
+```{r}
+ipaddr1 |> collect()
+```
+
+группируем по портам? вычисляем максимальный и средний размер трафика и находим порт с большей разницей
+
+```{r}
+ipaddr2 <-ipaddr1 %>%  
+  group_by(port) %>% 
+  summarise("mean"=mean(bytes), 
+            "max"=max(bytes), 
+            "sum" = sum(bytes)) %>%  
+  mutate("raznitsa"= max-mean) %>% 
+  arrange(desc(raznitsa)) %>% 
+  head(1)
+```
+
+```{r}
+ipaddr2 |> collect()
+```
+
+Мы определили порт, который использовался для другого трафика
+
+```{r}
+ipaddr3 <- ipaddr1  %>% 
+  filter(port==37) %>% 
+  group_by(src) %>% 
+  summarise("mean"= mean(bytes)) %>%
+  arrange(desc(mean)) %>% 
+  head(1) %>%
+  select(src)
+```
+
+```{r}
+ipaddr3 |> collect()
+```
+
+## Вывод
+
+В ходе работы мы ознакомились с применением облачных технологий хранения, подготовки и анализа данных, а также проанализировали метаинформацию о сетевом трафике.
